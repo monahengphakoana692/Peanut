@@ -1,3 +1,5 @@
+// com.example.peanut/PeanutService.java (Updated portions)
+
 package com.example.peanut;
 
 import android.app.Notification;
@@ -46,8 +48,8 @@ public class PeanutService extends Service {
     private Intent speechRecognizerIntent;
     private Handler mainHandler; // Handler to post tasks to the main thread
 
-    // Flag to track if TTS is initialized successfully
     private boolean isTtsInitialized = false;
+    private ConversationManager conversationManager; // NEW: Instance of ConversationManager
 
     // --- Service Lifecycle ---
 
@@ -55,50 +57,41 @@ public class PeanutService extends Service {
     public void onCreate() {
         super.onCreate();
         Log.d(TAG, "PeanutService onCreate");
-        mainHandler = new Handler(Looper.getMainLooper()); // Initialize mainHandler
-        // Initialize TTS and STT here
+        mainHandler = new Handler(Looper.getMainLooper());
+        conversationManager = new ConversationManager(); // Initialize ConversationManager
         initializeTextToSpeech();
-        initializeSpeechRecognizer(); // SpeechRecognizer creation also needs to be on the main thread
+        initializeSpeechRecognizer();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Log.d(TAG, "PeanutService onStartCommand");
 
-        createNotificationChannel(); // Create channel for Android O+
-        startForeground(NOTIFICATION_ID, createNotification()); // Start foreground service
+        createNotificationChannel();
+        startForeground(NOTIFICATION_ID, createNotification());
 
         if (intent != null) {
             String action = intent.getAction();
             if (ACTION_START_CONVERSATION.equals(action)) {
                 Log.d(TAG, "Received ACTION_START_CONVERSATION from MainActivity.");
-                // Ensure TTS is ready before speaking
+                conversationManager.resetConversation(); // Reset conversation state for a new interaction
                 if (isTtsInitialized) {
                     speak(getString(R.string.listening_prompt), UTTERANCE_ID_LISTEN);
                 } else {
                     Log.w(TAG, "TTS not initialized yet. Cannot start conversation immediately.");
-                    // Optionally, queue the speak call or show a message
                     showToast("Peanut's voice is not ready yet. Please try again in a moment.");
                 }
             } else if (ACTION_STOP_SERVICE.equals(action)) {
                 Log.d(TAG, "Received ACTION_STOP_SERVICE command.");
-                // Speak goodbye, then stop the service.
-                // Use a distinct utterance ID for goodbye so it doesn't trigger listening again.
                 speak("Goodbye! Stopping Peanut service.", UTTERANCE_ID_GOODBYE);
-                stopSelfDelayed(2000); // Give time for goodbye to be spoken
-                return START_NOT_STICKY; // Service will not be restarted if stopped explicitly
+                stopSelfDelayed(2000);
+                return START_NOT_STICKY;
             } else if (ACTION_START_SERVICE_ON_BOOT.equals(action)) {
                 Log.d(TAG, "Received ACTION_START_SERVICE_ON_BOOT. Service initialized.");
-                // On boot, don't immediately start listening unless specifically desired.
-                // If you want Peanut to say something, ensure TTS is ready.
-                // if (isTtsInitialized) {
-                //     speak("Peanut is ready.", null);
-                // }
+                conversationManager.resetConversation(); // Reset on boot as well
             }
         }
-
-        // We want the service to continue running until it is explicitly stopped
-        return START_STICKY; // If service is killed by system, it will be restarted
+        return START_STICKY;
     }
 
     @Override
@@ -120,18 +113,15 @@ public class PeanutService extends Service {
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
-        // For this simple case, we are not using binding, so return null
         return null;
     }
 
-    // --- Foreground Notification Management ---
-
+    // --- Foreground Notification Management (No changes needed here from previous version) ---
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel serviceChannel = new NotificationChannel(
                     CHANNEL_ID,
                     getString(R.string.notification_channel_name),
-                    // Use low importance to make it less intrusive but persistent
                     NotificationManager.IMPORTANCE_LOW
             );
             serviceChannel.setDescription(getString(R.string.notification_channel_description));
@@ -143,119 +133,102 @@ public class PeanutService extends Service {
     }
 
     private Notification createNotification() {
-        // Intent to open MainActivity when notification is tapped
         Intent notificationIntent = new Intent(this, MainActivity.class);
         PendingIntent pendingIntent = PendingIntent.getActivity(this,
-                0, notificationIntent, PendingIntent.FLAG_IMMUTABLE); // FLAG_IMMUTABLE required for API 23+
+                0, notificationIntent, PendingIntent.FLAG_IMMUTABLE);
 
-        // Intent for "Stop" action button in notification
         Intent stopServiceIntent = new Intent(this, PeanutService.class);
         stopServiceIntent.setAction(ACTION_STOP_SERVICE);
         PendingIntent stopPendingIntent = PendingIntent.getService(this,
                 0, stopServiceIntent, PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        // Replace R.drawable.ic_stop_black_24dp with an actual icon in your project
-        // If you don't have it, remove this line or add a suitable icon.
-        // For example, you can use android.R.drawable.ic_media_pause for a generic stop icon.
         int stopIconResId = R.drawable.ic_stop_black_24dp; // Ensure this drawable exists
         try {
-            // Check if the drawable exists to prevent crash if not found
             getResources().getDrawable(stopIconResId, null);
         } catch (android.content.res.Resources.NotFoundException e) {
             Log.e(TAG, "Missing drawable: ic_stop_black_24dp. Using default Android stop icon.", e);
-            stopIconResId = android.R.drawable.ic_media_pause; // Fallback to a common Android icon
+            stopIconResId = android.R.drawable.ic_media_pause;
         }
-
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle(getString(R.string.notification_title))
                 .setContentText(getString(R.string.notification_text))
-                .setSmallIcon(R.mipmap.ic_launcher) // Use your app's icon
+                .setSmallIcon(R.mipmap.ic_launcher)
                 .setContentIntent(pendingIntent)
-                // Add a "Stop" button to the notification
                 .addAction(stopIconResId, getString(R.string.notification_stop_action), stopPendingIntent)
-                .setPriority(NotificationCompat.PRIORITY_LOW) // Matches channel importance
+                .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build();
     }
 
-    // --- Text-to-Speech (TTS) Initialization and Speaking ---
-
+    // --- Text-to-Speech (TTS) Initialization and Speaking (Mostly unchanged, but logic around UTTERANCE_ID_GOODBYE improved) ---
     private void initializeTextToSpeech() {
-        textToSpeech = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
-            @Override
-            public void onInit(int status) {
-                if (status == TextToSpeech.SUCCESS) {
-                    int result = textToSpeech.setLanguage(Locale.US); // Consider Locale.getDefault() if broader language support is needed
-                    if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                        Log.e(TAG, "TTS Language not supported or data missing during init. Result: " + result);
-                        showToast("Peanut's voice language not supported.");
-                        isTtsInitialized = false;
-                        // Offer to install language data if necessary
-                        Intent installIntent = new Intent();
-                        installIntent.setAction(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA);
-                        installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(installIntent);
-                    } else {
-                        Log.d(TAG, "TTS Initialized successfully. Language set result: " + result);
-                        isTtsInitialized = true; // Set flag to true only on success
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                            textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                                @Override
-                                public void onStart(String utteranceId) {
-                                    Log.d(TAG, "TTS onStart: " + utteranceId);
-                                    // Make sure speech recognizer is not listening before starting new TTS
-                                    if (speechRecognizer != null) {
-                                        speechRecognizer.cancel();
-                                    }
-                                }
-
-                                @Override
-                                public void onDone(String utteranceId) {
-                                    Log.d(TAG, "TTS onDone: " + utteranceId);
-                                    // Trigger STT only if the completed speech was meant to prompt listening
-                                    if (utteranceId != null && (utteranceId.equals(UTTERANCE_ID_LISTEN) || utteranceId.equals(UTTERANCE_ID_RESPONSE))) {
-                                        // *** CRITICAL FIX: Post the call to startListening to the main thread ***
-                                        mainHandler.post(() -> {
-                                            if (speechRecognizer != null) {
-                                                try {
-                                                    Log.d(TAG, "Attempting to start SpeechRecognizer from TTS onDone (main thread).");
-                                                    speechRecognizer.startListening(speechRecognizerIntent);
-                                                } catch (Exception e) {
-                                                    Log.e(TAG, "Error starting SpeechRecognizer on main thread: " + e.getMessage(), e);
-                                                    showToast("Failed to start listening. Please try again.");
-                                                }
-                                            } else {
-                                                Log.e(TAG, "SpeechRecognizer is null when trying to start listening after TTS done.");
-                                                showToast("Speech input is not ready.");
-                                            }
-                                        });
-                                    } else if (utteranceId != null && utteranceId.equals(UTTERANCE_ID_GOODBYE)) {
-                                        Log.d(TAG, "Goodbye utterance finished. Service will stop shortly.");
-                                        // The stopSelfDelayed will handle stopping the service.
-                                    }
-                                }
-
-                                @Override
-                                public void onError(String utteranceId) {
-                                    Log.e(TAG, "TTS onError: " + utteranceId);
-                                    showToast("Peanut had an error speaking.");
-                                }
-
-                                @Override
-                                public void onStop(String utteranceId, boolean interrupted) {
-                                    Log.d(TAG, "TTS onStop: " + utteranceId + ", interrupted: " + interrupted);
-                                }
-                            });
-                        } else {
-                            Log.w(TAG, "UtteranceProgressListener not fully supported below API 21, speech timing might be less precise. Consider upgrading API level if possible.");
-                            isTtsInitialized = false; // Treat as not fully initialized if listener isn't reliable
-                        }
-                    }
-                } else {
-                    Log.e(TAG, "TTS Initialization failed! Status: " + status);
-                    showToast("Peanut's voice engine failed to initialize.");
+        textToSpeech = new TextToSpeech(this, status -> {
+            if (status == TextToSpeech.SUCCESS) {
+                int result = textToSpeech.setLanguage(Locale.US);
+                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    Log.e(TAG, "TTS Language not supported or data missing during init. Result: " + result);
+                    showToast("Peanut's voice language not supported.");
                     isTtsInitialized = false;
+                    Intent installIntent = new Intent();
+                    installIntent.setAction(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA);
+                    installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(installIntent);
+                } else {
+                    Log.d(TAG, "TTS Initialized successfully. Language set result: " + result);
+                    isTtsInitialized = true;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                            @Override
+                            public void onStart(String utteranceId) {
+                                Log.d(TAG, "TTS onStart: " + utteranceId);
+                                if (speechRecognizer != null) {
+                                    speechRecognizer.cancel(); // Stop current listening if TTS starts
+                                }
+                            }
+
+                            @Override
+                            public void onDone(String utteranceId) {
+                                Log.d(TAG, "TTS onDone: " + utteranceId);
+                                if (utteranceId != null && (utteranceId.equals(UTTERANCE_ID_LISTEN) || utteranceId.equals(UTTERANCE_ID_RESPONSE))) {
+                                    mainHandler.post(() -> {
+                                        if (speechRecognizer != null) {
+                                            try {
+                                                Log.d(TAG, "Attempting to start SpeechRecognizer from TTS onDone (main thread).");
+                                                speechRecognizer.startListening(speechRecognizerIntent);
+                                            } catch (Exception e) {
+                                                Log.e(TAG, "Error starting SpeechRecognizer on main thread: " + e.getMessage(), e);
+                                                showToast("Failed to start listening. Please try again.");
+                                            }
+                                        } else {
+                                            Log.e(TAG, "SpeechRecognizer is null when trying to start listening after TTS done.");
+                                            showToast("Speech input is not ready.");
+                                        }
+                                    });
+                                } else if (utteranceId != null && utteranceId.equals(UTTERANCE_ID_GOODBYE)) {
+                                    Log.d(TAG, "Goodbye utterance finished. Service will stop shortly.");
+                                }
+                            }
+
+                            @Override
+                            public void onError(String utteranceId) {
+                                Log.e(TAG, "TTS onError: " + utteranceId);
+                                showToast("Peanut had an error speaking.");
+                            }
+
+                            @Override
+                            public void onStop(String utteranceId, boolean interrupted) {
+                                Log.d(TAG, "TTS onStop: " + utteranceId + ", interrupted: " + interrupted);
+                            }
+                        });
+                    } else {
+                        Log.w(TAG, "UtteranceProgressListener not fully supported below API 21, speech timing might be less precise. Consider upgrading API level if possible.");
+                        isTtsInitialized = false;
+                    }
                 }
+            } else {
+                Log.e(TAG, "TTS Initialization failed! Status: " + status);
+                showToast("Peanut's voice engine failed to initialize.");
+                isTtsInitialized = false;
             }
         });
     }
@@ -267,68 +240,50 @@ public class PeanutService extends Service {
             return;
         }
 
-        // Stop current speech if any, to prevent overlapping or queueing issues
         if (textToSpeech.isSpeaking()) {
             textToSpeech.stop();
         }
 
-        // Check language availability before speaking
         int langAvailability = textToSpeech.isLanguageAvailable(Locale.US);
         Log.d(TAG, "speak: Attempting to speak '" + text + "'. Language availability for Locale.US: " + langAvailability);
 
-        // Only proceed if language is available or partially available
         if (langAvailability >= TextToSpeech.LANG_AVAILABLE) {
             Bundle params = new Bundle();
-            // Using a unique Utterance ID for better tracking in onDone/onError
             params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId);
             textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId);
         } else {
             Log.e(TAG, "TTS language not available to speak: '" + text + "' (Availability code: " + langAvailability + ")");
             showToast("Peanut cannot speak due to language issues.");
-            // Optionally, try setting a different default language or prompt for installation
         }
     }
 
-    // Overloaded speak method for general responses, which will trigger listening by default
     private void speak(String text) {
         speak(text, UTTERANCE_ID_RESPONSE);
     }
 
-    // --- SpeechRecognizer (STT) Initialization and Listener ---
-
+    // --- SpeechRecognizer (STT) Initialization and Listener (No functional changes from previous version) ---
     private void initializeSpeechRecognizer() {
         speechRecognizerIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault()); // Use device's default language
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault());
         speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, this.getPackageName());
-        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1); // Get only the best result
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
 
-        // Set timeouts for speech input
-        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L); // Silence after speech to consider complete
-        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L); // Silence to consider timeout (no speech at all)
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L);
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L);
 
-        // *** CRITICAL FIX: Ensure SpeechRecognizer.createSpeechRecognizer is called on the main thread ***
         mainHandler.post(() -> {
             try {
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(getApplicationContext()); // Use application context
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(getApplicationContext());
                 speechRecognizer.setRecognitionListener(new RecognitionListener() {
                     @Override
-                    public void onReadyForSpeech(Bundle params) {
-                        Log.d(TAG, "onReadyForSpeech: SpeechRecognizer is ready.");
-                        // showToast("Listening...");
-                    }
-
+                    public void onReadyForSpeech(Bundle params) { Log.d(TAG, "onReadyForSpeech: SpeechRecognizer is ready."); }
                     @Override
-                    public void onBeginningOfSpeech() {
-                        Log.d(TAG, "onBeginningOfSpeech: User has started speaking.");
-                    }
-
+                    public void onBeginningOfSpeech() { Log.d(TAG, "onBeginningOfSpeech: User has started speaking."); }
                     @Override
                     public void onRmsChanged(float rmsdB) { /* Log.d(TAG, "onRmsChanged: " + rmsdB); */ }
-
                     @Override
                     public void onBufferReceived(byte[] buffer) { Log.d(TAG, "onBufferReceived"); }
-
                     @Override
                     public void onEndOfSpeech() { Log.d(TAG, "onEndOfSpeech: User has stopped speaking."); }
 
@@ -338,21 +293,19 @@ public class PeanutService extends Service {
                         Log.e(TAG, "STT Error: " + errorMessage);
                         showToast("Speech recognition error: " + errorMessage);
 
-                        // If no speech input (timeout), or no match, prompt the user again.
-                        // These will call `speak(response)` which in turn will trigger new listening.
-                        // Make sure to stop current speech recognition if it's still running
                         if (speechRecognizer != null) {
                             speechRecognizer.cancel();
                         }
 
                         if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                            // If timeout and it's not a goodbye sequence, prompt again.
+                            // This might need more sophisticated state management if you have complex dialogues.
                             speak("I didn't hear anything. Please try again.");
                         } else if (error == SpeechRecognizer.ERROR_NO_MATCH) {
                             speak("I didn't understand that. Can you please rephrase?");
                         } else if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                             speak("My speech recognition is busy. Please wait a moment and try again.");
                         }
-                        // For other errors like network, permissions, etc., you might want to stop trying or show a persistent error.
                     }
 
                     @Override
@@ -362,7 +315,7 @@ public class PeanutService extends Service {
                         if (matches != null && !matches.isEmpty()) {
                             String userSpeech = matches.get(0);
                             Log.d(TAG, "User said: " + userSpeech);
-                            processUserSpeech(userSpeech);
+                            processUserSpeech(userSpeech); // Call the new processing method
                         } else {
                             speak("I didn't catch that. Could you please repeat?");
                         }
@@ -370,7 +323,6 @@ public class PeanutService extends Service {
 
                     @Override
                     public void onPartialResults(Bundle partialResults) { /* Log.d(TAG, "onPartialResults"); */ }
-
                     @Override
                     public void onEvent(int eventType, Bundle params) { Log.d(TAG, "onEvent: " + eventType); }
                 });
@@ -382,7 +334,6 @@ public class PeanutService extends Service {
         });
     }
 
-    // Helper method to get human-readable error messages for SpeechRecognizer
     public static String getErrorText(int errorCode) {
         String message;
         switch (errorCode) {
@@ -400,46 +351,27 @@ public class PeanutService extends Service {
         return message;
     }
 
-    // --- Core Logic: Processing User Speech ---
+    // --- Core Logic: Processing User Speech (NOW USES ConversationManager) ---
     private void processUserSpeech(String speech) {
-        String lowerCaseSpeech = speech.toLowerCase(Locale.US);
-        String response;
+        String lowerCaseSpeech = speech.toLowerCase(Locale.US).trim(); // Trim whitespace
 
-        if (lowerCaseSpeech.contains("hello") || lowerCaseSpeech.contains("hi")) {
-            response = "Hello there! How can I help you?";
-        } else if (lowerCaseSpeech.contains("peanut")) {
-            response = "Yes!, how may i help?";
-        }else if (lowerCaseSpeech.contains("how are you"))
-        {
-            response = "I'm doing great, thank you for asking!";
+        // Get response from the conversation manager
+        String response = conversationManager.getResponse(lowerCaseSpeech);
+        Log.d(TAG, "Peanut's response: " + response);
 
-        } else if (lowerCaseSpeech.contains("what is your name"))
-        {
-            response = "My name is Peanut. Nice to meet you.";
-
-        } else if (lowerCaseSpeech.contains("tell me a joke"))
-        {
-            response = "Why don't scientists trust atoms? Because they make up everything!";
-
-        } else if (lowerCaseSpeech.contains("goodbye") || lowerCaseSpeech.contains("bye")) {
-            response = "Goodbye! Have a great day.";
-            // If it's a goodbye, stop the service after speaking the response
+        // Check if the response signals an end to the conversation
+        if (conversationManager.isGoodbyeResponse(response)) {
             speak(response, UTTERANCE_ID_GOODBYE); // Use a unique ID that will NOT trigger listening
             stopSelfDelayed(2000); // Give time for goodbye to be spoken (adjust as needed)
-            return; // Don't proceed to listen again if stopping
         } else {
-            response = "I didn't understand that. Can you please rephrase?";
+            speak(response); // Otherwise, speak the response, which will then trigger listening
         }
-
-        speak(response); // Make Peanut speak the response, which will then trigger listening
     }
 
-    // Helper to stop service after a delay (useful for "goodbye" message)
     private void stopSelfDelayed(long delayMillis) {
         mainHandler.postDelayed(this::stopSelf, delayMillis);
     }
 
-    // Helper to show Toast messages safely from any thread
     private void showToast(String message) {
         mainHandler.post(() -> Toast.makeText(PeanutService.this, message, Toast.LENGTH_SHORT).show());
     }
