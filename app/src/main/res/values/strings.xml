@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Peanut</string>
+    <string name="listening_prompt">I am listening. Please speak.</string>
+    <string name="notification_channel_name">Peanut Service Channel</string>
+    <string name="notification_channel_description">Notifications for the Peanut background service.</string>
+    <string name="notification_title">Peanut is Active</string>
+    <string name="notification_text">Tap to open Peanut or stop the service.</string>
+    <string name="notification_stop_action">Stop</string>
+</resources>
