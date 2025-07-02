@@ -1,13 +1,12 @@
-// com.example.peanut/ConversationManager.java (Corrected Access Modifier)
+// C:\Users\Retshepile Sehloho\AndroidStudioProjects\Peanut\app\src\main\java\com\example\peanut\ConversationManager.java
 
 package com.example.peanut;
 
-import android.os.Handler; // Add this import
-import android.os.Looper; // Add this import
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
@@ -26,11 +25,16 @@ public class ConversationManager {
     // --- Conversational State ---
     private String userName = "there"; // Default name
     public Intent lastIntent = Intent.UNKNOWN; // Stores the last recognized intent
-    public Map<String, String> entities = new HashMap<>(); // Public to allow PeanutService to read extracted entities
+    public Map<String, String> entities = new HashMap<>(); // Stores extracted entities (e.g., "location" for weather)
     private boolean awaitingClarification = false; // Flag if Peanut is waiting for specific info
+    private boolean askedForName = false; // To track if Peanut has asked for the user's name
+
+    // Callback for Gemini responses to be sent back to PeanutService
+    public interface ExternalAiResponseCallback {
+        void onResponseReady(String response);
+    }
 
     // --- Intent Enumeration ---
-    // Represents the user's goal
     public enum Intent {
         GREETING,
         HOW_ARE_YOU,
@@ -41,200 +45,276 @@ public class ConversationManager {
         THANK_YOU,
         WHAT_TIME,
         GET_WEATHER,
-        GET_WEATHER_CLARIFICATION, // For when location is missing
+        GET_WEATHER_CLARIFICATION,
+        EXTERNAL_AI_QUERY, // NEW Intent for queries sent to an external AI
         UNKNOWN,
-        SMALL_TALK // General conversational filler or non-specific chatter
+        SMALL_TALK,
+        AFFIRMATION,
+        NEGATION
     }
 
-    // --- Response Banks for Variety (unchanged) ---
+    // --- Response Banks for Variety --- (Keep the same as before for humanity improvements)
     private final List<String> greetings = Arrays.asList(
-            "Hello! How can I assist you today, %s?",
-            "Hi there, %s! What's on your mind?",
-            "Greetings, %s! How may I help you?",
-            "Hey, %s! It's good to hear from you."
+            "Hello there, %s! How can I assist you today?",
+            "Hi, %s! It's great to hear from you. What's on your mind?",
+            "Greetings, %s! Ready to help. What can I do?",
+            "Hey %s! Good to connect. How can I be of service?"
     );
 
     private final List<String> howAreYouResponses = Arrays.asList(
-            "I'm doing great, thank you for asking! How are you doing today?",
-            "As an AI, I don't have feelings, but I'm ready to help! What about you?",
-            "I am functioning optimally! And yourself, %s?",
-            "All systems nominal! How's your day going, %s?"
+            "I'm doing wonderfully, thank you for asking! And how are you feeling today?",
+            "As an AI, I don't experience emotions, but I'm fully operational and ready to assist! How about yourself, %s?",
+            "All my systems are running smoothly! Thanks for checking in. How's your day progressing, %s?",
+            "I'm in top digital shape! What about you, %s? Anything I can do to make your day better?"
     );
 
     private final List<String> nameInquiryResponses = Arrays.asList(
-            "My name is Peanut. Nice to meet you, %s.",
-            "You can call me Peanut, %s. What's your name?",
-            "I am Peanut. What can I do for you today, %s?"
+            "My name is Peanut, and I'm here to help you. What name should I call you by?",
+            "I'm Peanut, your digital assistant! It's lovely to meet you. And you are?",
+            "You can simply call me Peanut. May I know your name, %s?",
+            "I am Peanut. What's your name, if you don't mind me asking?"
+    );
+
+    private final List<String> setNameConfirmation = Arrays.asList(
+            "It's a pleasure to finally meet you, %s! I'll remember that.",
+            "Got it, %s! Nice to put a name to the voice. How can I help you?",
+            "Hello, %s! I've updated your name in my memory.",
+            "Wonderful, %s! Now that I know your name, what's next?"
     );
 
     private final List<String> jokeResponses = Arrays.asList(
-            "Why don't scientists trust atoms? Because they make up everything!",
-            "What do you call a fake noodle? An impasta!",
+            "Why don't scientists trust atoms? Because they make up everything! chuckled %s",
+            "What do you call a fake noodle? An impasta! Haha, %s.",
             "Why did the scarecrow win an award? Because he was outstanding in his field!",
-            "I told my wife she was drawing her eyebrows too high. She looked surprised.",
-            "Why don't skeletons fight each other? They don't have the guts!"
+            "I told my wife she was drawing her eyebrows too high. She looked surprised. (Hope that made you smile, %s!)",
+            "Why don't skeletons fight each other? They don't have the guts! Get it, %s?"
     );
 
     private final List<String> goodbyeResponses = Arrays.asList(
-            "Goodbye! Have a great day, %s!",
-            "See you later, %s!",
-            "Farewell for now, %s! Come back anytime.",
-            "Until next time, %s!"
+            "Goodbye, %s! It was a pleasure assisting you. Have a fantastic day!",
+            "See you later, %s! Don't hesitate to call if you need anything.",
+            "Farewell for now, %s! I'll be here when you return.",
+            "Until next time, %s! Take care."
     );
 
     private final List<String> thankYouResponses = Arrays.asList(
-            "You're welcome, %s! Happy to help.",
-            "Anytime, %s!",
-            "Glad I could assist, %s.",
-            "No problem, %s!"
+            "You're absolutely welcome, %s! I'm always happy to help.",
+            "Anytime, %s! It's what I'm here for.",
+            "Glad I could assist, %s. Is there anything else on your mind?",
+            "No problem at all, %s! Happy to be of service."
     );
 
     private final List<String> timeResponses = Arrays.asList(
-            "The current time is %s.",
-            "It's %s right now.",
-            "Right now it's %s."
+            "The current time is %s. Hope that helps!",
+            "It's %s right now. Anything else you'd like to know?",
+            "Right now it's %s. Is there anything else I can tell you?"
     );
 
     private final List<String> weatherLocationPrompt = Arrays.asList(
-            "Which city would you like the weather for, %s?",
-            "Please tell me the city for the weather forecast.",
-            "I need a city name to tell you the weather. Where are you thinking of, %s?"
+            "I can tell you the weather, %s! Which city are you interested in?",
+            "For weather information, I need a specific city. Where would you like to know about?",
+            "Please tell me the city name for the weather forecast. I'm ready to look it up!"
     );
 
     private final List<String> understandingFailureResponses = Arrays.asList(
-            "I'm not quite sure I understand. Could you please rephrase that, %s?",
-            "My apologies, I didn't catch that. Could you say it differently, %s?",
-            "Hmm, I'm a bit confused. Can you explain what you mean, %s?",
-            "Could you elaborate on that, please, %s?",
-            "I'm still learning. Can you give me more context, %s?"
+            "I'm not quite sure I grasped that, %s. Could you try rephrasing?",
+            "My apologies, I didn't catch that clearly. Could you say it a different way, %s?",
+            "Hmm, I'm a bit confused. Can you elaborate on what you mean, %s?",
+            "I'm still learning, %s. Could you give me more context or be more specific?",
+            "I think I missed something there. Can you tell me again, %s?",
+            "I'm sorry, I don't understand that request. Perhaps you could ask in a different way?"
     );
 
     private final List<String> smallTalkResponses = Arrays.asList(
-            "That's interesting. What else is on your mind?",
-            "I see. Anything else you wanted to talk about, %s?",
-            "Okay, %s. What's next on your agenda?",
-            "Do you have any other questions for me, %s?",
-            "I'm here if you need anything else, %s.",
-            "Is there something specific you'd like to do or discuss?"
+            "That's interesting. What else is on your mind, %s?",
+            "I see. Is there anything specific you'd like me to do or discuss, %s?",
+            "Okay, %s. I'm here if you have more questions.",
+            "I'm always ready for a new task, %s. What would you like to do?",
+            "Thinking about anything exciting, %s?",
+            "Tell me more, %s! Or perhaps you have a question for me?"
+    );
+
+    private final List<String> affirmationResponses = Arrays.asList(
+            "Great!",
+            "Alright then!",
+            "Understood!",
+            "Perfect!"
+    );
+
+    private final List<String> negationResponses = Arrays.asList(
+            "Okay, no problem.",
+            "Understood. Anything else?",
+            "Alright. How can I help then?",
+            "No worries."
     );
 
     // --- Constructor ---
     public ConversationManager() {
-        // You could initialize more complex models or data here if needed
+        GeminiApiClient.initialize(); // Initialize Gemini client when ConversationManager is created
     }
-
-    // --- Public Interface for PeanutService ---
 
     /**
      * Processes user input and generates a conversational response based on intent and context.
+     * For UNKNOWN intents, it delegates to an external AI and returns an "awaiting" message.
      *
      * @param userInput The lowercased, trimmed speech from the user.
-     * @return A generated response, potentially incorporating context and external data.
+     * @param callback Optional callback for asynchronous responses (e.g., from external AI or weather API).
+     * @return An immediate response string. If an async operation is triggered, this string
+     * will be an intermediate message (e.g., "thinking...") and the final response
+     * will come via the callback.
      */
-    public String getResponse(String userInput) {
+    public String getResponse(String userInput, ExternalAiResponseCallback callback) {
         // Reset entities and clarification status at the beginning of each turn
         entities.clear();
+        boolean wasAwaitingClarification = awaitingClarification;
         awaitingClarification = false;
 
-        Intent currentIntent = recognizeIntent(userInput); // This will populate 'entities' and set 'userName' if applicable
-        // The call to extractEntities is now handled inside recognizeIntent if needed,
-        // or more precisely, getResponse directly utilizes the extracted entities if the intent requires it.
-        // For example, SET_MY_NAME modifies userName directly from within recognizeIntent.
+        Intent currentIntent = recognizeIntent(userInput);
 
-        String response = "";
+        String immediateResponse = "";
 
         // --- Dialogue Management: Handle Clarification first ---
-        // If we were awaiting a location and the user provided something that looks like a location.
-        if (lastIntent == Intent.GET_WEATHER_CLARIFICATION && currentIntent == Intent.UNKNOWN && extractLocationFromFallback(userInput)) {
-            // User provided location in response to clarification prompt
-            currentIntent = Intent.GET_WEATHER; // Now we have the location, proceed with GET_WEATHER intent
-            awaitingClarification = false;
-        } else if (lastIntent == Intent.GET_WEATHER_CLARIFICATION && currentIntent == Intent.UNKNOWN && !entities.containsKey("location")) {
-            // User did not provide a location or a recognized intent while clarification was awaited
-            response = String.format(randomChoice(understandingFailureResponses), userName) + " I'm still waiting for the city name for the weather.";
-            awaitingClarification = true; // Keep awaiting
-            lastIntent = Intent.GET_WEATHER_CLARIFICATION; // Maintain clarification state
-            return response; // Exit early to wait for a valid location
+        if (wasAwaitingClarification && lastIntent == Intent.GET_WEATHER_CLARIFICATION) {
+            if (extractLocationFromFallback(userInput)) {
+                currentIntent = Intent.GET_WEATHER; // Now we have the location, proceed
+            } else {
+                immediateResponse = String.format(randomChoice(understandingFailureResponses), userName) + " I'm still waiting for the city name for the weather.";
+                awaitingClarification = true;
+                lastIntent = Intent.GET_WEATHER_CLARIFICATION;
+                return immediateResponse; // Exit early
+            }
         }
-
 
         // --- Intent-based Response Generation ---
         switch (currentIntent) {
             case GREETING:
-                response = String.format(randomChoice(greetings), userName);
+                immediateResponse = String.format(randomChoice(greetings), userName);
+                if (!askedForName && userName.equals("there")) {
+                    immediateResponse += " By the way, what name should I use to call you?";
+                    askedForName = true;
+                }
                 break;
             case HOW_ARE_YOU:
-                response = String.format(randomChoice(howAreYouResponses), userName);
+                immediateResponse = String.format(randomChoice(howAreYouResponses), userName);
                 break;
             case NAME_INQUIRY:
-                response = String.format(randomChoice(nameInquiryResponses), userName);
+                immediateResponse = String.format(randomChoice(nameInquiryResponses), userName);
+                askedForName = true;
                 break;
             case SET_MY_NAME:
-                // Name extraction already handled in recognizeIntent
-                response = "It's a pleasure to meet you, " + userName + "! How can I help you today?";
+                immediateResponse = String.format(randomChoice(setNameConfirmation), userName);
+                askedForName = true;
                 break;
             case TELL_JOKE:
-                response = randomChoice(jokeResponses);
+                immediateResponse = String.format(randomChoice(jokeResponses), userName);
+                immediateResponse += " Did that make you smile? What else can I do for you?";
                 break;
             case GOODBYE:
-                response = String.format(randomChoice(goodbyeResponses), userName);
+                immediateResponse = String.format(randomChoice(goodbyeResponses), userName);
                 break;
             case THANK_YOU:
-                response = String.format(randomChoice(thankYouResponses), userName);
+                immediateResponse = String.format(randomChoice(thankYouResponses), userName);
                 break;
             case WHAT_TIME:
-                response = String.format(randomChoice(timeResponses), getCurrentTime());
+                immediateResponse = String.format(randomChoice(timeResponses), getCurrentTime());
                 break;
             case GET_WEATHER:
                 String location = entities.get("location");
                 if (location != null && !location.isEmpty()) {
-                    // This is where you would call your weather API.
-                    // For now, it's a placeholder. The actual fetch will be done by PeanutService.
-                    response = "Ok, fetching the weather for " + location + ".";
+                    immediateResponse = "Ok, fetching the weather for " + location + ".";
+                    // Trigger actual weather fetch asynchronously
+                    fetchWeather(location, new WeatherCallback() {
+                        @Override
+                        public void onWeatherResult(String weatherInfo) {
+                            callback.onResponseReady(weatherInfo);
+                        }
+
+                        @Override
+                        public void onWeatherError(String errorMessage) {
+                            callback.onResponseReady(errorMessage + " Is there anything else I can help with?");
+                        }
+                    });
                 } else {
-                    response = String.format(randomChoice(weatherLocationPrompt), userName);
-                    awaitingClarification = true; // Set flag to expect a location next
-                    currentIntent = Intent.GET_WEATHER_CLARIFICATION; // Update last intent for context
+                    immediateResponse = String.format(randomChoice(weatherLocationPrompt), userName);
+                    awaitingClarification = true;
+                    currentIntent = Intent.GET_WEATHER_CLARIFICATION;
                 }
                 break;
-            case SMALL_TALK: // If a general phrase, use a small talk response
-                response = String.format(randomChoice(smallTalkResponses), userName);
+            case AFFIRMATION:
+                immediateResponse = randomChoice(affirmationResponses);
+                if (lastIntent == Intent.TELL_JOKE) {
+                    immediateResponse += " Glad to hear it! Anything else?";
+                } else {
+                    immediateResponse += " How can I proceed?";
+                }
+                break;
+            case NEGATION:
+                immediateResponse = randomChoice(negationResponses);
+                immediateResponse += " What would you like to do instead?";
+                break;
+            case SMALL_TALK:
+                immediateResponse = String.format(randomChoice(smallTalkResponses), userName);
                 break;
             case UNKNOWN:
             default:
-                response = String.format(randomChoice(understandingFailureResponses), userName);
+                // When intent is UNKNOWN, delegate to Gemini
+                immediateResponse = "Hmm, let me think about that for a moment..."; // Immediate response while Gemini processes
+                lastIntent = Intent.EXTERNAL_AI_QUERY; // Set intent to signify awaiting external AI
+                Log.d(TAG, "Delegating UNKNOWN query to Gemini: " + userInput);
+
+                // Call Gemini API asynchronously
+                GeminiApiClient.generateTextFromInput(userInput, new GeminiApiClient.GeminiResponseCallback() {
+                    @Override
+                    public void onGeminiResponse(String response) {
+                        // Pass the Gemini's response back via the callback
+                        callback.onResponseReady(response);
+                        // After Gemini responds, reset lastIntent to UNKNOWN or SMALL_TALK if no specific follow-up needed
+                        lastIntent = Intent.SMALL_TALK; // Or another appropriate post-Gemini state
+                    }
+
+                    @Override
+                    public void onGeminiError(String error) {
+                        // Pass the error message back via the callback
+                        callback.onResponseReady(error);
+                        lastIntent = Intent.UNKNOWN; // Remain in UNKNOWN state
+                    }
+                });
                 break;
         }
 
-        // Update the last recognized intent for the next turn
-        lastIntent = currentIntent;
+        // Only update lastIntent if it's not an EXTERNAL_AI_QUERY,
+        // as EXTERNAL_AI_QUERY state will be managed by its callback
+        if (currentIntent != Intent.UNKNOWN || lastIntent != Intent.EXTERNAL_AI_QUERY) {
+            lastIntent = currentIntent;
+        }
 
-        return response;
+        return immediateResponse; // Return the immediate response
     }
 
     /**
      * Determines the user's intent from their input.
-     * This is a rule-based NLU for now, expandable to ML models.
-     * Public because PeanutService needs to check the intent before calling getResponse in some cases (like async weather).
+     * (Keep this method the same as the previous "humanity" update)
      */
-    public Intent recognizeIntent(String userInput) { // Changed from private to public
-        if (userInput.matches(".*\\b(hello|hi|hey|greetings)\\b.*")) {
+    public Intent recognizeIntent(String userInput) {
+        if (userInput.matches(".*\\b(hello|hi|hey|greetings|good morning|good afternoon|good evening)\\b.*")) {
             return Intent.GREETING;
         }
-        if (userInput.matches(".*\\b(how are you|how you doing)\\b.*")) {
+        if (userInput.matches(".*\\b(how are you|how you doing|how's it going)\\b.*")) {
             return Intent.HOW_ARE_YOU;
         }
-        if (userInput.matches(".*\\b(what is your name|who are you|your name)\\b.*")) {
+        if (userInput.matches(".*\\b(what is your name|who are you|your name|what do you call yourself)\\b.*")) {
             return Intent.NAME_INQUIRY;
         }
-        if (userInput.matches(".*\\b(my name is|i am called)\\s+([a-zA-Z]+).*")) {
-            // Extract name immediately when this intent is recognized
-            Pattern pattern = Pattern.compile("my name is\\s+([a-zA-Z]+)|i am called\\s+([a-zA-Z]+)");
+        if (userInput.matches(".*\\b(my name is|i am called|you can call me|i'm)\\s+([a-zA-Z]+).*")) {
+            Pattern pattern = Pattern.compile("my name is\\s+([a-zA-Z]+)|i am called\\s+([a-zA-Z]+)|you can call me\\s+([a-zA-Z]+)|i'm\\s+([a-zA-Z]+)");
             Matcher matcher = pattern.matcher(userInput);
             if (matcher.find()) {
-                String name = matcher.group(1);
-                if (name == null) {
-                    name = matcher.group(2);
+                String name = null;
+                for (int i = 1; i <= matcher.groupCount(); i++) {
+                    if (matcher.group(i) != null) {
+                        name = matcher.group(i);
+                        break;
+                    }
                 }
                 if (name != null) {
                     this.userName = name.trim();
@@ -243,113 +323,86 @@ public class ConversationManager {
             }
             return Intent.SET_MY_NAME;
         }
-        if (userInput.matches(".*\\b(tell me a joke|joke please|make me laugh)\\b.*")) {
+        if (userInput.matches(".*\\b(tell me a joke|joke please|make me laugh|tell a funny story)\\b.*")) {
             return Intent.TELL_JOKE;
         }
-        if (userInput.matches(".*\\b(goodbye|bye|see you later|farewell)\\b.*")) {
+        if (userInput.matches(".*\\b(goodbye|bye|see you later|farewell|i'm leaving|i'm done|exit)\\b.*")) {
             return Intent.GOODBYE;
         }
-        if (userInput.matches(".*\\b(thank you|thanks|i appreciate it)\\b.*")) {
+        if (userInput.matches(".*\\b(thank you|thanks|i appreciate it|cheers)\\b.*")) {
             return Intent.THANK_YOU;
         }
-        if (userInput.matches(".*\\b(what time is it|current time|time now)\\b.*")) {
+        if (userInput.matches(".*\\b(what time is it|current time|time now|do you know the time)\\b.*")) {
             return Intent.WHAT_TIME;
         }
-        if (userInput.matches(".*\\b(weather|forecast|how's the weather)\\b.*")) {
-            // Extract location when weather intent is recognized
+        if (userInput.matches(".*\\b(weather|forecast|how's the weather|temperature)\\b.*")) {
             extractWeatherLocation(userInput);
             return Intent.GET_WEATHER;
         }
-        // General small talk/acknowledgements that don't fit specific intents
-        if (userInput.matches(".*\\b(okay|alright|right|hmm|tell me more|what about)\\b.*")) {
+        if (userInput.matches(".*\\b(yes|yeah|yep|okay|sure|alright|fine)\\b.*")) {
+            return Intent.AFFIRMATION;
+        }
+        if (userInput.matches(".*\\b(no|nope|not really|nah)\\b.*")) {
+            return Intent.NEGATION;
+        }
+        if (userInput.matches(".*\\b(okay|alright|right|hmm|what about|tell me more|interesting)\\b.*")) {
             return Intent.SMALL_TALK;
         }
         return Intent.UNKNOWN;
     }
 
-    /**
-     * Extracts entities (like location) from the user input for specific intents.
-     * This is private as it's called internally by recognizeIntent or getResponse.
-     */
     private void extractWeatherLocation(String userInput) {
-        // Example: "weather in London", "weather for Paris"
-        Pattern pattern = Pattern.compile("weather (in|for|of|at)\\s+([a-zA-Z\\s]+)");
+        Pattern pattern = Pattern.compile("weather (in|for|of|at)\\s+([a-zA-Z\\s]+)|([a-zA-Z\\s]+) weather");
         Matcher matcher = pattern.matcher(userInput);
         if (matcher.find()) {
-            String location = matcher.group(2).trim();
-            entities.put("location", location);
-            Log.d(TAG, "Extracted location from weather intent: " + location);
+            String location = matcher.group(2);
+            if (location == null) {
+                location = matcher.group(3);
+            }
+            if (location != null) {
+                entities.put("location", location.trim());
+                Log.d(TAG, "Extracted location from weather intent: " + location.trim());
+            }
         }
-        // Add more patterns if user might just say "London weather"
-        // e.g., Pattern.compile("([a-zA-Z\\s]+) weather"); might be too broad
     }
 
-    /**
-     * Attempts to extract a location when Peanut is awaiting clarification.
-     * This handles cases where the user just says the city name.
-     */
     private boolean extractLocationFromFallback(String userInput) {
-        // Simple check: if the input is not a recognized intent and not very short,
-        // assume it's a location if we're awaiting one.
-        // This is a heuristic and can be improved with a list of known cities or more advanced NLU.
-        if (lastIntent == Intent.GET_WEATHER_CLARIFICATION && !recognizeIntent(userInput).equals(Intent.UNKNOWN) && userInput.length() > 2) {
-            // If user says something like "weather in london" after clarification was requested,
-            // then recognizeIntent already handled it. This branch handles just the city name.
-            // We need to re-extract location if it's a new input.
-            extractWeatherLocation(userInput); // Try to extract if it's a full weather phrase
-            if(!entities.containsKey("location")) { // If not extracted by a full phrase, assume the whole input is the city
-                entities.put("location", userInput);
+        if (userInput.length() > 2 && recognizeIntent(userInput) == Intent.UNKNOWN) {
+            if (userInput.matches("[a-zA-Z\\s]+")) {
+                entities.put("location", userInput.trim());
+                Log.d(TAG, "Extracted fallback location during clarification: " + userInput.trim());
+                return true;
             }
-            Log.d(TAG, "Extracted fallback location: " + userInput);
-            return true;
-        } else if (lastIntent == Intent.GET_WEATHER_CLARIFICATION && recognizeIntent(userInput).equals(Intent.UNKNOWN) && userInput.length() > 2) {
-            // If it's a general unknown input, and we're awaiting clarification, assume it's the location
-            entities.put("location", userInput);
-            Log.d(TAG, "Extracted raw user input as location: " + userInput);
-            return true;
         }
         return false;
     }
 
-
-    // --- External Knowledge Retrieval (Simulated/Direct) ---
-
     private String getCurrentTime() {
-        SimpleDateFormat sdf = new SimpleDateFormat("h:mm a", Locale.US); // e.g., "9:03 PM"
+        SimpleDateFormat sdf = new SimpleDateFormat("h:mm a", Locale.US);
         return sdf.format(new Date());
     }
 
-    // Placeholder for actual weather API call
-    // This would typically involve a network request and callbacks in a real app.
     public interface WeatherCallback {
         void onWeatherResult(String weatherInfo);
         void onWeatherError(String errorMessage);
     }
 
     public void fetchWeather(String location, WeatherCallback callback) {
-        // In a real application, this would be a network request.
-        // For demonstration, let's simulate a delay and a response.
         Log.d(TAG, "Simulating weather fetch for: " + location);
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             if (location.toLowerCase(Locale.US).contains("maseru")) {
-                callback.onWeatherResult("The weather in Maseru is currently sunny with a temperature of 25 degrees Celsius.");
+                callback.onWeatherResult("The weather in Maseru is currently clear with a temperature of 10 degrees Celsius. Perfect for a cool evening!");
             } else if (location.toLowerCase(Locale.US).contains("london")) {
-                callback.onWeatherResult("The weather in London is cloudy with a temperature of 15 degrees Celsius.");
+                callback.onWeatherResult("The weather in London is cloudy with a temperature of 15 degrees Celsius. Don't forget your umbrella!");
             } else if (location.toLowerCase(Locale.US).contains("new york")) {
-                callback.onWeatherResult("The weather in New York is partly cloudy with a temperature of 22 degrees Celsius.");
+                callback.onWeatherResult("The weather in New York is partly cloudy with a temperature of 22 degrees Celsius. A pleasant day!");
             }
             else {
-                callback.onWeatherError("I couldn't find the weather for " + location + ". Please try a different city.");
+                callback.onWeatherError("I couldn't find the weather for " + location + ". My apologies!");
             }
-        }, 1500); // Simulate network delay
+        }, 1500);
     }
 
-
-    // --- Helper Methods ---
-
-    /**
-     * Helper to pick a random string from a list.
-     */
     private String randomChoice(List<String> list) {
         if (list == null || list.isEmpty()) {
             return "I don't have a response for that right now.";
@@ -357,31 +410,19 @@ public class ConversationManager {
         return list.get(random.nextInt(list.size()));
     }
 
-    /**
-     * Resets any conversational state, useful when the service restarts or a new conversation begins.
-     */
     public void resetConversation() {
         userName = "there";
         lastIntent = Intent.UNKNOWN;
         entities.clear();
         awaitingClarification = false;
+        askedForName = false;
         Log.d(TAG, "Conversation state reset.");
     }
 
-    /**
-     * Check if the response implies stopping the conversation.
-     *
-     * @param response The generated response.
-     * @return True if the response indicates a stop (e.g., "Goodbye!").
-     */
     public boolean isGoodbyeResponse(String response) {
-        return lastIntent == Intent.GOODBYE; // Simpler check using the recognized intent
+        return lastIntent == Intent.GOODBYE;
     }
 
-    /**
-     * Checks if Peanut is currently waiting for a specific piece of information from the user.
-     * @return true if clarification is awaited, false otherwise.
-     */
     public boolean isAwaitingClarification() {
         return awaitingClarification;
     }

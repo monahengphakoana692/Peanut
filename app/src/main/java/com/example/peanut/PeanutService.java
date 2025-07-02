@@ -28,28 +28,28 @@ import androidx.core.app.NotificationCompat;
 import java.util.ArrayList;
 import java.util.Locale;
 
-public class PeanutService extends Service {
+public class PeanutService extends Service implements ConversationManager.ExternalAiResponseCallback { // IMPLEMENT THE NEW CALLBACK INTERFACE
 
     private static final String TAG = "PeanutService";
-    private static final int NOTIFICATION_ID = 1; // Unique ID for the foreground notification
-    private static final String CHANNEL_ID = "PeanutServiceChannel"; // ID for the notification channel
+    private static final int NOTIFICATION_ID = 1;
+    private static final String CHANNEL_ID = "PeanutServiceChannel";
 
-    // Custom actions for Intents to control the service
     public static final String ACTION_START_CONVERSATION = "com.example.peanut.ACTION_START_CONVERSATION";
     public static final String ACTION_STOP_SERVICE = "com.example.peanut.ACTION_STOP_SERVICE";
-    public static final String ACTION_START_SERVICE_ON_BOOT = "com.example.peanut.ACTION_START_SERVICE_ON_BOOT"; // Action from BootReceiver
+    public static final String ACTION_START_SERVICE_ON_BOOT = "com.example.peanut.ACTION_START_SERVICE_ON_BOOT";
 
     private static final String UTTERANCE_ID_LISTEN = "utterance_id_listen";
     private static final String UTTERANCE_ID_RESPONSE = "utterance_id_response";
-    private static final String UTTERANCE_ID_GOODBYE = "utterance_id_goodbye"; // New ID for explicit goodbyes
+    private static final String UTTERANCE_ID_GOODBYE = "utterance_id_goodbye";
+    private static final String UTTERANCE_ID_THINKING = "utterance_id_thinking"; // New ID for "thinking" message
 
     private TextToSpeech textToSpeech;
     private SpeechRecognizer speechRecognizer;
     private Intent speechRecognizerIntent;
-    private Handler mainHandler; // Handler to post tasks to the main thread
+    private Handler mainHandler;
 
     private boolean isTtsInitialized = false;
-    private ConversationManager conversationManager; // Instance of ConversationManager
+    private ConversationManager conversationManager;
 
     // --- Service Lifecycle ---
 
@@ -58,7 +58,7 @@ public class PeanutService extends Service {
         super.onCreate();
         Log.d(TAG, "PeanutService onCreate");
         mainHandler = new Handler(Looper.getMainLooper());
-        conversationManager = new ConversationManager(); // Initialize ConversationManager
+        conversationManager = new ConversationManager();
         initializeTextToSpeech();
         initializeSpeechRecognizer();
     }
@@ -74,9 +74,8 @@ public class PeanutService extends Service {
             String action = intent.getAction();
             if (ACTION_START_CONVERSATION.equals(action)) {
                 Log.d(TAG, "Received ACTION_START_CONVERSATION from MainActivity.");
-                conversationManager.resetConversation(); // Reset conversation state for a new interaction
+                conversationManager.resetConversation();
                 if (isTtsInitialized) {
-                    // Initial prompt when conversation starts
                     speak(getString(R.string.listening_prompt), UTTERANCE_ID_LISTEN);
                 } else {
                     Log.w(TAG, "TTS not initialized yet. Cannot start conversation immediately.");
@@ -85,11 +84,11 @@ public class PeanutService extends Service {
             } else if (ACTION_STOP_SERVICE.equals(action)) {
                 Log.d(TAG, "Received ACTION_STOP_SERVICE command.");
                 speak("Goodbye! Stopping Peanut service.", UTTERANCE_ID_GOODBYE);
-                stopSelfDelayed(2000); // Give TTS time to finish speaking
+                stopSelfDelayed(2000);
                 return START_NOT_STICKY;
             } else if (ACTION_START_SERVICE_ON_BOOT.equals(action)) {
                 Log.d(TAG, "Received ACTION_START_SERVICE_ON_BOOT. Service initialized.");
-                conversationManager.resetConversation(); // Reset on boot as well
+                conversationManager.resetConversation();
             }
         }
         return START_STICKY;
@@ -143,15 +142,13 @@ public class PeanutService extends Service {
         PendingIntent stopPendingIntent = PendingIntent.getService(this,
                 0, stopServiceIntent, PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        // Make sure R.drawable.ic_stop_black_24dp exists or use a default Android icon
         int stopIconResId = R.drawable.ic_stop_black_24dp;
         try {
             getResources().getDrawable(stopIconResId, null);
         } catch (android.content.res.Resources.NotFoundException e) {
             Log.e(TAG, "Missing drawable: ic_stop_black_24dp. Using default Android stop icon.", e);
-            stopIconResId = android.R.drawable.ic_media_pause; // Fallback icon
+            stopIconResId = android.R.drawable.ic_media_pause;
         }
-
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle(getString(R.string.notification_title))
@@ -172,7 +169,6 @@ public class PeanutService extends Service {
                     Log.e(TAG, "TTS Language not supported or data missing during init. Result: " + result);
                     showToast("Peanut's voice language not supported.");
                     isTtsInitialized = false;
-                    // Prompt user to install missing TTS data
                     Intent installIntent = new Intent();
                     installIntent.setAction(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA);
                     installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -185,8 +181,9 @@ public class PeanutService extends Service {
                             @Override
                             public void onStart(String utteranceId) {
                                 Log.d(TAG, "TTS onStart: " + utteranceId);
-                                if (speechRecognizer != null) {
-                                    speechRecognizer.cancel(); // Stop current listening if TTS starts
+                                if (speechRecognizer != null &&
+                                        !utteranceId.equals(UTTERANCE_ID_THINKING)) { // Don't cancel speech rec if just speaking "thinking..."
+                                    speechRecognizer.cancel();
                                 }
                             }
 
@@ -194,9 +191,10 @@ public class PeanutService extends Service {
                             public void onDone(String utteranceId) {
                                 Log.d(TAG, "TTS onDone: " + utteranceId);
                                 // Only start listening again if it's a regular response or initial prompt,
-                                // NOT if it's a goodbye message (which stops the service)
+                                // NOT if it's a goodbye message or a "thinking" message (where we await Gemini's final response)
                                 if (utteranceId != null &&
-                                        (utteranceId.equals(UTTERANCE_ID_LISTEN) || utteranceId.equals(UTTERANCE_ID_RESPONSE))) {
+                                        (utteranceId.equals(UTTERANCE_ID_LISTEN) ||
+                                                utteranceId.equals(UTTERANCE_ID_RESPONSE))) {
                                     mainHandler.post(() -> {
                                         if (speechRecognizer != null) {
                                             try {
@@ -213,6 +211,9 @@ public class PeanutService extends Service {
                                     });
                                 } else if (utteranceId != null && utteranceId.equals(UTTERANCE_ID_GOODBYE)) {
                                     Log.d(TAG, "Goodbye utterance finished. Service will stop shortly.");
+                                } else if (utteranceId != null && utteranceId.equals(UTTERANCE_ID_THINKING)) {
+                                    Log.d(TAG, "Thinking utterance finished. Waiting for Gemini response.");
+                                    // Do NOT restart listening yet; the actual Gemini response will trigger it.
                                 }
                             }
 
@@ -229,8 +230,7 @@ public class PeanutService extends Service {
                         });
                     } else {
                         Log.w(TAG, "UtteranceProgressListener not fully supported below API 21, speech timing might be less precise. Consider upgrading API level if possible.");
-                        // For older APIs, TTS might speak but we can't reliably know when to restart listening.
-                        isTtsInitialized = false; // Mark as not fully initialized for precise control
+                        isTtsInitialized = false;
                     }
                 }
             } else {
@@ -248,7 +248,6 @@ public class PeanutService extends Service {
             return;
         }
 
-        // Stop any ongoing speech before starting a new one
         if (textToSpeech.isSpeaking()) {
             textToSpeech.stop();
         }
@@ -266,7 +265,6 @@ public class PeanutService extends Service {
         }
     }
 
-    // Overload for convenience, uses UTTERANCE_ID_RESPONSE by default
     private void speak(String text) {
         speak(text, UTTERANCE_ID_RESPONSE);
     }
@@ -277,11 +275,10 @@ public class PeanutService extends Service {
         speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault());
         speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, this.getPackageName());
-        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1); // Get only the top result for simplicity
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
 
-        // Configure silence detection
-        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L); // How long after speech ends to consider input complete
-        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L); // How long of total silence to wait before giving up
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L);
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L);
 
         mainHandler.post(() -> {
             try {
@@ -304,28 +301,21 @@ public class PeanutService extends Service {
                         Log.e(TAG, "STT Error: " + errorMessage);
                         showToast("Speech recognition error: " + errorMessage);
 
-                        // Cancel current recognition
                         if (speechRecognizer != null) {
                             speechRecognizer.cancel();
                         }
 
-                        // Determine if we should prompt again based on error and conversation state
-                        if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT && !conversationManager.isAwaitingClarification()) {
-                            // If it's a timeout and we're not waiting for specific info, prompt generally
-                            speak("I didn't hear anything. Please try again.");
-                        } else if (error == SpeechRecognizer.ERROR_NO_MATCH && !conversationManager.isAwaitingClarification()) {
-                            // If no match and not waiting for specific info, prompt generally
-                            speak("I didn't understand that. Can you please rephrase?");
+                        // Only re-prompt if it's a timeout/no_match AND we are not expecting a Gemini response
+                        // or explicit clarification.
+                        if ((error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || error == SpeechRecognizer.ERROR_NO_MATCH) &&
+                                conversationManager.lastIntent != ConversationManager.Intent.EXTERNAL_AI_QUERY &&
+                                !conversationManager.isAwaitingClarification()) {
+                            speak("I didn't hear anything or understand that. Can you please try again?");
                         } else if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
-                            // If busy, ask user to wait
                             speak("My speech recognition is busy. Please wait a moment and try again.");
                         } else if (error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT && error != SpeechRecognizer.ERROR_NO_MATCH) {
-                            // For other errors (e.g., network, audio), just apologize and don't re-listen immediately
                             speak("I'm sorry, I encountered an error and cannot process your request right now.");
                         }
-                        // If awaiting clarification, and it's a timeout or no_match, we still need to wait for clarification
-                        // so don't speak a generic "didn't hear" as the response will be handled by the next `getResponse` call
-                        // which would recognize it's still waiting.
                     }
 
                     @Override
@@ -335,7 +325,7 @@ public class PeanutService extends Service {
                         if (matches != null && !matches.isEmpty()) {
                             String userSpeech = matches.get(0);
                             Log.d(TAG, "User said: " + userSpeech);
-                            handleUserSpeech(userSpeech); // Process the user's speech
+                            handleUserSpeech(userSpeech);
                         } else {
                             speak("I didn't catch that. Could you please repeat?");
                         }
@@ -354,7 +344,6 @@ public class PeanutService extends Service {
         });
     }
 
-    // Helper to get descriptive error text for SpeechRecognizer errors
     public static String getErrorText(int errorCode) {
         String message;
         switch (errorCode) {
@@ -377,54 +366,45 @@ public class PeanutService extends Service {
         String lowerCaseSpeech = speech.toLowerCase(Locale.US).trim();
 
         // Get the response directly from the conversation manager.
-        // The conversation manager will handle intent recognition, entity extraction,
-        // and dialogue state (like awaiting clarification).
-        String response = conversationManager.getResponse(lowerCaseSpeech);
-        Log.d(TAG, "Peanut's initial response from CM: " + response);
+        // Pass 'this' (PeanutService) as the callback for asynchronous responses.
+        String immediateResponse = conversationManager.getResponse(lowerCaseSpeech, this);
+        Log.d(TAG, "Peanut's immediate response from CM: " + immediateResponse);
 
-        // Check if the ConversationManager has set itself to await clarification for weather
-        if (conversationManager.isAwaitingClarification()) {
-            speak(response, UTTERANCE_ID_RESPONSE); // Speak the prompt (e.g., "Which city?") and re-listen
-            return; // Exit, waiting for the user's next input for clarification
-        }
-
-        // If the intent (after processing by getResponse) is GET_WEATHER and a location was successfully extracted,
-        // then initiate the asynchronous weather fetch.
-        // The `response` at this point will contain "Ok, fetching the weather for [city]." from ConversationManager.
-        // Ensure `lastIntent` is accessed correctly (it is public now).
-        // Ensure `entities` is accessed correctly (it is public now).
-        if (conversationManager.lastIntent == ConversationManager.Intent.GET_WEATHER && conversationManager.entities.containsKey("location")) {
-            String location = conversationManager.entities.get("location");
-            if (location != null && !location.isEmpty()) {
-                speak(response); // Speak the "fetching..." message
-                conversationManager.fetchWeather(location, new ConversationManager.WeatherCallback() {
-                    @Override
-                    public void onWeatherResult(String weatherInfo) {
-                        mainHandler.post(() -> { // Ensure TTS call is on UI thread
-                            speak(weatherInfo, UTTERANCE_ID_RESPONSE); // Speak result, then re-listen
-                        });
-                    }
-
-                    @Override
-                    public void onWeatherError(String errorMessage) {
-                        mainHandler.post(() -> { // Ensure TTS call is on UI thread
-                            speak(errorMessage + " Is there anything else I can help with?", UTTERANCE_ID_RESPONSE); // Speak error, then re-listen
-                        });
-                    }
-                });
-                return; // Return early, as weather fetch is asynchronous. Speaking/listening handled in callback.
+        // If CM indicates it's awaiting clarification (e.g., for weather location),
+        // or if it's delegating to external AI, speak the immediate response
+        // and then wait for the callback to provide the final action (like re-listening).
+        if (conversationManager.isAwaitingClarification() ||
+                conversationManager.lastIntent == ConversationManager.Intent.EXTERNAL_AI_QUERY ||
+                (conversationManager.lastIntent == ConversationManager.Intent.GET_WEATHER && conversationManager.entities.containsKey("location"))) {
+            // For EXTERNAL_AI_QUERY, speak the "thinking..." message
+            if (conversationManager.lastIntent == ConversationManager.Intent.EXTERNAL_AI_QUERY) {
+                speak(immediateResponse, UTTERANCE_ID_THINKING); // Use specific ID to prevent immediate re-listen
+            } else { // For clarification or weather fetching message
+                speak(immediateResponse, UTTERANCE_ID_RESPONSE);
             }
-        }
-
-        // For all other intents, or if weather intent couldn't extract location
-        // (which would lead to clarification being set, handled by the first `if` block above),
-        // speak the direct response from the ConversationManager.
-        if (conversationManager.isGoodbyeResponse(response)) {
-            speak(response, UTTERANCE_ID_GOODBYE);
-            stopSelfDelayed(2000); // Give time for goodbye to be spoken before stopping
+            // Do NOT re-start listening here; the callback (onResponseReady) will do that.
+        } else if (conversationManager.isGoodbyeResponse(immediateResponse)) {
+            speak(immediateResponse, UTTERANCE_ID_GOODBYE);
+            stopSelfDelayed(2000);
         } else {
-            speak(response); // Speak the response, which will then trigger listening
+            // For all other synchronous responses, speak and then re-listen
+            speak(immediateResponse);
         }
+    }
+
+    // --- Implementation of ConversationManager.ExternalAiResponseCallback ---
+    @Override
+    public void onResponseReady(String response) {
+        mainHandler.post(() -> { // Ensure TTS call is on UI thread
+            Log.d(TAG, "Received async response (Gemini/Weather): " + response);
+            if (conversationManager.isGoodbyeResponse(response)) {
+                // If the final response happens to be a goodbye (e.g., from Gemini saying goodbye)
+                speak(response, UTTERANCE_ID_GOODBYE);
+                stopSelfDelayed(2000);
+            } else {
+                speak(response, UTTERANCE_ID_RESPONSE); // Speak response, then re-listen
+            }
+        });
     }
 
     // Utility to stop the service after a delay
